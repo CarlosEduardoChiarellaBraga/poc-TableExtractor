@@ -1,12 +1,14 @@
 # Desafio Técnico — Extração Estruturada de Itens de Licitações (ConLicitação)
 
-Este repositório contém uma solução **fim-a-fim** para o desafio técnico "Extração Estruturada de Itens de Licitações Públicas", cujo objetivo é, a partir de um conjunto de arquivos **JSON** (metadados) e suas respectivas pastas de **anexos** (PDF/DOCX), **extrair automaticamente** os itens licitados no formato estruturado exigido (`ResultadoLicitacao` → `ItemExtraido`).
+Este repositório contém uma solução para o desafio técnico "Extração Estruturada de Itens de Licitações Públicas", cujo objetivo é, a partir de um conjunto de arquivos **JSON** (metadados) e suas respectivas pastas de **anexos**, **extrair automaticamente** os itens licitados no formato estruturado exigido (`ResultadoLicitacao` → `ItemExtraido`).
 
 A solução foi desenhada para lidar com as principais dificuldades descritas no enunciado:
 - itens em **documentos anexos** com layout variável (tabelas quebradas, linhas "continuadas", títulos de lote/grupo etc.);
 - itens semi-estruturados no campo `data.itens` do próprio JSON;
 - anexos ausentes, corrompidos e variações de nome/pasta;
 - execução **determinística e reprodutível**.
+
+**Observação Importante:** item foi implementado como sendo para capturar os edge cases em que o item é subdividido no formato X.XX.
 
 ---
 
@@ -182,13 +184,13 @@ outputs/
   - anexos ausentes/corrompidos são ignorados e o resultado ainda é produzido com o que houver disponível
 - **Auditabilidade**:
   - artefatos intermediários são salvos (tabelas e parsing por anexo)
-  - `--debug` adiciona `fonte` por item
+  - `--debug` adiciona `fonte` por item (sempre importante saber de onde o script extrai as informações)
 
 ---
 
 ## Limitações conhecidas
 
-- PDFs **escaneados** (imagem) não são processados por OCR nesta versão (o enunciado trata OCR como bônus).
+- PDFs **escaneados** (imagem) não são processados por OCR nesta versão.
 - Anexos do tipo **XLS/XLSX** não são processados.
 
 ---
