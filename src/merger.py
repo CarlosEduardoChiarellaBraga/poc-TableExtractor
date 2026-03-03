@@ -2,7 +2,7 @@
 Fusion layer: merges ItemExtraido lists from multiple sources.
 
 Strategy:
-  1. Source priority: JSON itens > relacaoitens PDF > edital PDF > TR PDF
+  1. Source priority: edital PDF > JSON itens > relacaoitens PDF  > TR PDF
   2. For each (lote, item) key, take the version with the highest confidence.
   3. Field-level merge: fill missing fields (quantidade=0, unidade="")
      from lower-priority sources.

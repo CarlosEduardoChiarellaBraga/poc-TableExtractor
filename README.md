@@ -1,9 +1,9 @@
 # Desafio Técnico — Extração Estruturada de Itens de Licitações (ConLicitação)
 
-Este repositório contém uma solução **fim-a-fim** para o desafio técnico “Extração Estruturada de Itens de Licitações Públicas”, cujo objetivo é, a partir de um conjunto de arquivos **JSON** (metadados) e suas respectivas pastas de **anexos** (PDF/DOCX), **extrair automaticamente** os itens licitados no formato estruturado exigido (`ResultadoLicitacao` → `ItemExtraido`).
+Este repositório contém uma solução **fim-a-fim** para o desafio técnico "Extração Estruturada de Itens de Licitações Públicas", cujo objetivo é, a partir de um conjunto de arquivos **JSON** (metadados) e suas respectivas pastas de **anexos** (PDF/DOCX), **extrair automaticamente** os itens licitados no formato estruturado exigido (`ResultadoLicitacao` → `ItemExtraido`).
 
 A solução foi desenhada para lidar com as principais dificuldades descritas no enunciado:
-- itens em **documentos anexos** com layout variável (tabelas quebradas, linhas “continuadas”, títulos de lote/grupo etc.);
+- itens em **documentos anexos** com layout variável (tabelas quebradas, linhas "continuadas", títulos de lote/grupo etc.);
 - itens semi-estruturados no campo `data.itens` do próprio JSON;
 - anexos ausentes, corrompidos e variações de nome/pasta;
 - execução **determinística e reprodutível**.
@@ -59,11 +59,11 @@ downloads/
 A solução é composta por **três etapas principais**, com responsabilidades separadas:
 
 ### 1) Extractor (PDF/DOCX → `*_tables.json`)
-Arquivo: `src/extractor.py`
+Arquivo: `extractor.py`
 
 - Varre anexos **PDF** e **DOCX**
 - Para PDF, usa `pdfplumber` e `page.extract_tables()` para capturar tabelas por página
-- Para DOCX, converte para PDF com `docx2pdf` (quando possível) e aplica o mesmo pipeline
+- Para DOCX, usa `python-docx` para leitura nativa de tabelas e texto, sem necessidade de Microsoft Word
 - Salva um `*_tables.json` por anexo e também um consolidado por licitação
 
 Saída (por anexo):
@@ -79,29 +79,29 @@ Saída (por anexo):
 ```
 
 ### 2) Parser (tabelas → `ItemExtraido`)
-Arquivo: `src/parsers/pdf_parser.py`
+Arquivo: `parsers/pdf_parser.py`
 
 - Lê os `*_tables.json`
-- Detecta tabelas de itens por heurística de cabeçalho (ex.: “ITEM”, “QUANTIDADE/QTD”, “UNIDADE/UND”, “DESCRIÇÃO/ESPECIFICAÇÃO”)
+- Detecta tabelas de itens por heurística de cabeçalho (ex.: "ITEM", "QUANTIDADE/QTD", "UNIDADE/UND", "DESCRIÇÃO/ESPECIFICAÇÃO")
 - Extrai:
-  - `item` (inteiro)
+  - `item` (string; suporta flat `"1"` e hierárquico `"1.1"`, `"2.14"`)
   - `quantidade` (inteiro; normaliza `1.000,00` → `1000`)
   - `unidade_fornecimento` (string)
   - `objeto` (descrição; junta linhas quebradas/continuações)
-  - `lote` quando identificado (ex.: “LOTE 01”, “LOTE ÚNICO”)
+  - `lote` quando identificado (ex.: "LOTE 01", "LOTE ÚNICO")
 - Gera um `*_resultado.json` por anexo e retorna a lista de itens extraídos
 
 ### 3) Aggregator (JSON + Parser → `ResultadoLicitacao` final)
-Arquivos: `src/aggregator.py` + `src/merger.py`
+Arquivos: `aggregator.py` + `merger.py`
 
 - Lê o JSON ConLicitação e extrai itens semi-estruturados do campo `data.itens`
-  - Parser: `src/parsers/json_itens.py`
+  - Parser: `parsers/json_itens.py`
 - Extrai e parseia anexos (etapas 1 e 2)
 - **Unifica** as duas fontes (`data.itens` e anexos) em uma saída final:
   - deduplicação por chave `(lote, item)`
   - preenchimento de campos faltantes (ex.: o JSON tem item/descrição mas não tem unidade; o PDF tem unidade)
   - preserva/propaga metadados: `numero_pregao`, `orgao`, `cidade`, `estado`
-- Em modo `--debug`, adiciona `fonte` em cada item para auditoria (“veio do JSON” vs “veio do anexo X”).
+- Em modo `--debug`, adiciona `fonte` em cada item para auditoria ("veio do JSON" vs "veio do anexo X").
 
 ---
 
@@ -113,7 +113,7 @@ Como nem sempre os anexos estão perfeitamente referenciados pelo campo `data.an
 2. **Pasta padrão**: `downloads/<licitacao_stem>/` (qualquer `.pdf`/`.docx`)
 3. **Fallback global**: índice de todos os `.pdf/.docx` sob `downloads/` (para casos com subpastas fora do padrão)
 
-Isso evita o caso “JSON foi processado mas nenhum PDF foi extraído”.
+Isso evita o caso "JSON foi processado mas nenhum PDF foi extraído".
 
 ---
 
@@ -121,15 +121,10 @@ Isso evita o caso “JSON foi processado mas nenhum PDF foi extraído”.
 
 Requisitos:
 - Python **3.10+**
-- Dependências em `requirements.txt`
 
-Instale:
 ```bash
-pip install -r requirements.txt
+pip install pdfplumber python-docx
 ```
-
-### Observação importante sobre DOCX
-`docx2pdf` normalmente depende do Microsoft Word no Windows/macOS. Se não estiver disponível, anexos `.docx` serão **pulados** (sem quebrar a execução).
 
 ---
 
@@ -138,12 +133,22 @@ pip install -r requirements.txt
 Execute na raiz do projeto (onde existe `downloads/`):
 
 ```bash
-python src/main.py downloads outputs
+python main.py downloads outputs
 ```
 
 Modo debug (inclui `"fonte"` em cada item):
 ```bash
-python src/main.py downloads outputs --debug
+python main.py downloads outputs --debug
+```
+
+O pipeline roda em duas fases automaticamente:
+1. Extração e parsing → `outputs/pre_resultado_final.json`
+2. Sanitização → `outputs/resultado.json`
+
+Não é necessário rodar o `sanitize.py` manualmente. Ele ainda pode ser executado de forma standalone se necessário:
+
+```bash
+python sanitize.py --input outputs/pre_resultado_final.json --output outputs/resultado.json
 ```
 
 ---
@@ -154,9 +159,11 @@ Após rodar, você terá:
 
 ```
 outputs/
-├── resultado.json                     # consolidado final (array com uma entrada por licitação)
-├── <licitacao_1>.json                 # resultado final por licitação
-├── <licitacao_2>.json
+├── pre_resultado_final.json           # resultado bruto (pré-sanitização)
+├── resultado.json                     # consolidado final sanitizado
+├── resultado_parcial/
+│   ├── <licitacao_1>.json             # resultado final por licitação
+│   └── <licitacao_2>.json
 ├── tabelas/<licitacao>/..._tables.json
 └── pdf_parsed/<licitacao>/..._resultado.json
 ```
@@ -165,7 +172,7 @@ outputs/
 
 ## Decisões de design
 
-- **Separação clara de responsabilidades**: extractor (captura), parser (interpreta), aggregator (unifica)
+- **Separação clara de responsabilidades**: extractor (captura), parser (interpreta), aggregator (unifica), sanitize (filtra)
 - **Heurísticas simples e extensíveis**: o parser de itens é baseado em cabeçalhos e regras de normalização
 - **Determinismo**:
   - ordenação consistente de arquivos e itens
@@ -182,9 +189,7 @@ outputs/
 ## Limitações conhecidas
 
 - PDFs **escaneados** (imagem) não são processados por OCR nesta versão (o enunciado trata OCR como bônus).
-- A extração de itens via anexos foca em **tabelas** (via `pdfplumber.extract_tables()`); documentos cujo conteúdo relevante esteja apenas em texto corrido podem exigir uma estratégia adicional de parsing textual.
-- Anexos do tipo **XLS** não são processados.
-- A extração de **lotes/grupos** funciona quando o lote aparece como cabeçalho (“LOTE 01”, etc.). Documentos que apresentam o mapeamento “Grupos” ao final exigem lógica específica (ver aviso fora deste README).
+- Anexos do tipo **XLS/XLSX** não são processados.
 
 ---
 
@@ -193,7 +198,7 @@ outputs/
 - Confirme que `outputs/resultado.json` existe e é um array com 1 entrada por licitação.
 - Para uma licitação específica, confira:
   - `anexos_processados` inclui os anexos realmente lidos
-  - `itens_extraidos` tem itens com `item` inteiro, `quantidade` inteira, `unidade_fornecimento` string e `objeto` não vazio
+  - `itens_extraidos` tem itens com `item` string, `quantidade` inteira, `unidade_fornecimento` string e `objeto` não vazio
 - Rode com `--debug` para auditar a origem de cada item (`fonte`).
 
 ---
@@ -201,13 +206,13 @@ outputs/
 ## Estrutura do código
 
 ```
-src/
-  main.py                 # orquestra o pipeline fim-a-fim
-  extractor.py            # PDF/DOCX -> tables json
-  aggregator.py           # unifica itens do JSON + anexos
-  merger.py               # regras de merge/dedup/preenchimento
-  models.py               # dataclasses ItemExtraido/ResultadoLicitacao (+ debug)
-  parsers/
-    json_itens.py         # parser do campo data.itens (texto semi-estruturado)
-    pdf_parser.py         # parser de tables json -> itens estruturados
+main.py                 # orquestra o pipeline fim-a-fim (inclui sanitização automática)
+extractor.py            # PDF/DOCX -> tables json
+aggregator.py           # unifica itens do JSON + anexos
+merger.py               # regras de merge/dedup/preenchimento
+models.py               # dataclasses ItemExtraido/ResultadoLicitacao (+ debug)
+sanitize.py             # filtro pós-processamento de itens incompletos
+parsers/
+  json_itens.py         # parser do campo data.itens (texto semi-estruturado)
+  pdf_parser.py         # parser de tables json -> itens estruturados
 ```
