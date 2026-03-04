@@ -135,12 +135,12 @@ pip install pdfplumber python-docx
 Execute na raiz do projeto (onde existe `downloads/`):
 
 ```bash
-python main.py downloads outputs
+python src/main.py downloads outputs
 ```
 
 Modo debug (inclui `"fonte"` em cada item):
 ```bash
-python main.py downloads outputs --debug
+python src/main.py downloads outputs --debug
 ```
 
 O pipeline roda em duas fases automaticamente:
