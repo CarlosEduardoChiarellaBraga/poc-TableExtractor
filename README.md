@@ -186,7 +186,27 @@ outputs/
 
 - PDFs **escaneados** (imagem) não são processados por OCR nesta versão.
 - Anexos do tipo **XLS/XLSX** não são processados.
-- Bugs e falhas de parsing (ex: arquivo 389539bc919572ba8fac88a625970cb7).
+- Bugs e falhas de parsing. Ex:
+```json
+      {
+        "lote": null,
+        "item": "1.95",
+        "objeto": "TOTAIS:",
+        "quantidade": 1095,
+        "unidade_fornecimento": "TOTAIS:"
+      }
+```
+```json
+
+      {
+        "lote": null,
+        "item": "3",
+        "objeto": "OUTSOURCING DE IMPRESSAO - PAGINAS A4 - MONOCROMATICO - DENTRO DA FRANQUIA SEM PAPEL",
+        "quantidade": 26573,
+        "unidade_fornecimento": "PREGÃO"
+      },
+
+```
 
 ---
 
