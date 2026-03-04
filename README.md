@@ -8,7 +8,7 @@ A solução foi desenhada para lidar com as principais dificuldades descritas no
 - anexos ausentes, corrompidos e variações de nome/pasta;
 - execução **determinística e reprodutível**.
 
-**Observação Importante:** item foi implementado como sendo para capturar os edge cases em que o item é subdividido no formato X.XX.
+**Observação Importante:** item foi implementado como sendo string para capturar os edge cases em que o item é subdividido no formato X.XX.
 
 ---
 
