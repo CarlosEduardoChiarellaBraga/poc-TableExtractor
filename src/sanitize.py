@@ -2,19 +2,17 @@
 """
 sanitize.py
 
-Filtra item-a-item dentro do resultado.json.
+Filters items inside the result JSON on a per-item basis.
 
-Regra:
-- Para cada item em `itens_extraidos`, se QUALQUER um destes campos estiver “vazio”,
-  o item é removido:
-    - item: "" ou "0"
-    - objeto: ""
-    - unidade_fornecimento: ""
-    - quantidade: 0 (ou não numérico / None)
+Rule — an item is removed if ANY of these conditions holds:
+  - ``item``                is "" or "0"
+  - ``objeto``              is ""
+  - ``unidade_fornecimento`` is ""
+  - ``quantidade``          is 0 (or non-numeric / None)
 
-Saída:
-- imprime itens_before e itens_after (contagem global)
-- escreve um novo arquivo (ou sobrescreve com --inplace, criando .bak)
+Output:
+  - prints ``itens_before`` and ``itens_after`` counts (global across all docs)
+  - writes a new file, or overwrites the input with --inplace (creating a .bak)
 """
 
 from __future__ import annotations
@@ -27,13 +25,21 @@ from typing import Any, Dict, List, Tuple
 
 
 def norm(s: Any) -> str:
+    """Coerce any value to a stripped string, treating None as empty string."""
     return ("" if s is None else str(s)).strip()
 
 
 def to_int(x: Any) -> int:
+    """Convert a value to int, returning 0 on failure or for falsy inputs.
+
+    Handles the variety of types that ``quantidade`` may arrive as after JSON
+    deserialisation (int, float, str with thousand-separators, bool, None).
+    Only digits and a leading minus sign are retained before parsing.
+    """
     if x is None:
         return 0
     if isinstance(x, bool):
+        # bool is a subclass of int in Python; treat True/False as 1/0.
         return int(x)
     if isinstance(x, int):
         return x
@@ -42,7 +48,7 @@ def to_int(x: Any) -> int:
     s = norm(x)
     if not s:
         return 0
-    # mantém apenas dígitos e sinal
+    # Strip everything except digits and a leading minus sign.
     cleaned = "".join(ch for ch in s if ch.isdigit() or ch == "-")
     if cleaned in ("", "-"):
         return 0
@@ -53,12 +59,26 @@ def to_int(x: Any) -> int:
 
 
 def is_invalid_item(it: Dict[str, Any]) -> bool:
+    """Return True when the item dict is missing any required field.
+
+    An item is considered invalid — and should be removed — when any of the
+    following is true:
+      - ``item`` is empty or equals "0"
+      - ``objeto`` is empty
+      - ``unidade_fornecimento`` is empty
+      - ``quantidade`` resolves to 0
+
+    Args:
+        it: A single item dict as found in ``itens_extraidos``.
+
+    Returns:
+        True if the item should be dropped, False if it should be kept.
+    """
     item = norm(it.get("item", ""))
     objeto = norm(it.get("objeto", ""))
     und = norm(it.get("unidade_fornecimento", ""))
     qtd = to_int(it.get("quantidade", 0))
 
-    # “vazio” aqui inclui: strings vazias, item == "0", e quantidade == 0
     if item == "" or item == "0":
         return True
     if objeto == "":
@@ -71,15 +91,34 @@ def is_invalid_item(it: Dict[str, Any]) -> bool:
 
 
 def filter_payload(payload: Any) -> Tuple[Any, int, int]:
-    """
-    Retorna (novo_payload, itens_before, itens_after).
-    Suporta:
-      - payload como lista de docs
-      - payload como dict wrapper com key "results" (fallback)
+    """Remove invalid items from every licitação document in the payload.
+
+    Supports two payload shapes:
+      - A plain list of document dicts (the normal ``pre_resultado_final.json``
+        format produced by ``main.py``).
+      - A dict with a ``"results"`` key containing such a list (legacy wrapper).
+
+    Items that fail ``is_invalid_item`` are silently dropped. Documents that
+    have no ``itens_extraidos`` list (or whose list is empty) are kept
+    unchanged; only individual invalid items are removed.
+
+    Non-dict items inside ``itens_extraidos`` are also dropped because they
+    cannot be validated against the required fields.
+
+    Args:
+        payload: Deserialised JSON — either a list of docs or a ``{"results": [...]}`` dict.
+
+    Returns:
+        A tuple of (filtered_payload, itens_before, itens_after) where
+        ``itens_before`` and ``itens_after`` are global counts across all docs.
+
+    Raises:
+        SystemExit: When the payload shape is not recognised.
     """
     wrapper = None
     wrapper_key = None
 
+    # Detect whether the payload uses the legacy {"results": [...]} wrapper.
     if isinstance(payload, dict):
         if "results" in payload and isinstance(payload["results"], list):
             wrapper = payload
@@ -98,7 +137,7 @@ def filter_payload(payload: Any) -> Tuple[Any, int, int]:
     new_docs = []
     for doc in docs:
         if not isinstance(doc, dict):
-            # se doc não é dict, mantém como está (não sabemos mexer)
+            # Preserve non-dict entries unchanged (unknown format).
             new_docs.append(doc)
             continue
 
@@ -112,7 +151,7 @@ def filter_payload(payload: Any) -> Tuple[Any, int, int]:
         kept_items: List[Any] = []
         for it in items:
             if not isinstance(it, dict):
-                # item inválido (não dá pra validar campos) -> remove
+                # Non-dict item entries are always dropped — can't validate fields.
                 continue
             if is_invalid_item(it):
                 continue
@@ -120,10 +159,12 @@ def filter_payload(payload: Any) -> Tuple[Any, int, int]:
 
         itens_after += len(kept_items)
 
+        # Shallow-copy the doc dict so the original payload is not mutated.
         doc2 = dict(doc)
         doc2["itens_extraidos"] = kept_items
         new_docs.append(doc2)
 
+    # Rebuild the wrapper if the input used one.
     if wrapper is not None:
         out = dict(wrapper)
         out[wrapper_key] = new_docs
@@ -133,6 +174,15 @@ def filter_payload(payload: Any) -> Tuple[Any, int, int]:
 
 
 def main() -> None:
+    """CLI entry point for standalone sanitization of a result JSON file.
+
+    Reads ``pre_resultado_final.json`` (or a custom ``--input`` path), applies
+    ``filter_payload``, and writes the cleaned result to ``resultado.json``
+    (or a custom ``--output`` path).
+
+    With ``--inplace``, the input file is overwritten and a ``.bak`` backup is
+    created automatically before writing.
+    """
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", type=Path, default=Path("pre_resultado_final.json"))
     ap.add_argument("--output", type=Path, default=Path("resultado.json"))
