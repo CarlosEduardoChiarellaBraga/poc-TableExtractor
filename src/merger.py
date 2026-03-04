@@ -16,11 +16,8 @@ from models import ItemExtraido, _item_str_sort_key
 logger = logging.getLogger(__name__)
 
 # Source priority order (lower index = higher priority).
-# "edital" PDFs are considered the most authoritative because they are the
-# official procurement specification. The JSON itens field comes next, followed
-# by relacaoitens reports and term-of-reference documents.
-SOURCE_PRIORITY = ["edital", "json", "relacaoitens", "termo_referencia"]
-
+# "edital" PDFs are considered the most authoritative because they are the official procurement specification
+SOURCE_PRIORITY = ["edital", "anexo", "termo_referencia", "json", "relacaoitens"]
 
 def merge_sources(
     sources: dict[str, list[ItemExtraido]],

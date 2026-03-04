@@ -135,16 +135,32 @@ def _is_item_number(s: str) -> bool:
 
 
 def _is_section_title(text: str) -> bool:
-    """Return True when the text looks like an all-caps section heading.
+    """Return True when the text looks like a section/group header (not an item).
 
-    Heuristic: more than 65 % of alphabetic characters are uppercase.
-    Used to avoid appending section headings to the previous item's objeto.
+    The original heuristic (uppercase ratio) was too aggressive for licitação tables
+    like this PDF, where legitimate continuation lines can be ALL CAPS
+    (e.g. "NA LOCAÇÃO COM FORNECIMENTO DE MATERIAL").
+
+    We keep the uppercase check, but require the text to also look like a *real*
+    section label via keywords and short length.
     """
     if not text:
         return False
-    alpha = [c for c in text if c.isalpha()]
+
+    t = _norm(text)
+    if len(t) > 60:
+        return False
+    if ":" in t:
+        return False
+
+    # Only treat as a "section" if it contains a typical section keyword.
+    if not re.search(r"(GRUPO|SUBGRUPO|SEÇÃO|SECAO|CATEGORIA|LOTE|ANEXO|TOTAL)", t.upper()):
+        return False
+
+    alpha = [c for c in t if c.isalpha()]
     if not alpha:
         return False
+
     return sum(c.isupper() for c in alpha) / len(alpha) > 0.65
 
 
@@ -159,36 +175,55 @@ def _looks_like_code(s: str) -> bool:
     return bool(re.fullmatch(r"[\d\.\-\/]+", s)) and len(s) >= 4
 
 
+def _compact_header_token(s: str) -> str:
+    """Compact a header cell to a token for robust matching.
+
+    This PDF often splits header words across lines/cells (e.g. "ITE
+M",
+    "LOC
+AL"). By removing whitespace/punctuation we can still match them as
+    "ITEM" and "LOCAL".
+    """
+    return re.sub(r"[^A-Z0-9]", "", _norm(s).upper())
+
+
 def _detect_header_indices(header_row: list[str]) -> dict[str, int]:
     """Map column roles to their indices by inspecting a candidate header row.
 
-    Scans each cell's uppercased content against known keyword patterns for
-    the four relevant columns: ``item``, ``qtd``, ``und``, ``obj``.
+    Same intent as before, but more tolerant to split headers like "ITE M".
 
-    Uses ``setdefault`` so the first matching column for each role wins —
-    important when a table has multiple description-like columns.
-
-    Args:
-        header_row: A single table row (list of strings) to inspect.
-
-    Returns:
-        Dict with zero or more of the keys ``"item"``, ``"qtd"``, ``"und"``,
-        ``"obj"``, mapping to the 0-based column index.
-        A header row that doesn't look like a header returns an empty dict.
+    Returns keys among: item, qtd, und, obj.
     """
-    hdr = [c.upper().strip() for c in header_row]
     idx: dict[str, int] = {}
-    for i, c in enumerate(hdr):
-        if not c:
+    for i, cell in enumerate(header_row):
+        if not cell:
             continue
-        if c in ("ITEM", "ITEM.", "Nº ITEM", "N° ITEM", "N.°", "N°", "Nº") or c.startswith("ITEM"):
+
+        raw = _norm(cell).upper().strip()
+        tok = _compact_header_token(cell)
+
+        # ITEM / Nº ITEM variants (tok catches "ITE M" -> "ITEM")
+        if tok in ("ITEM", "ITEM.", "NITEM", "NOITEM", "NºITEM", "N°ITEM", "N°", "Nº") or raw.startswith("ITEM"):
             idx.setdefault("item", i)
-        if "QTD" in c or "QUANTIDADE" in c or c in ("QT", "QT."):
+
+        # Quantidade
+        # Quantidade ("QTD", "QUANT.", "QUANTIDADE")
+        if (
+            "QTD" in tok
+            or "QUANTIDADE" in raw
+            or tok.startswith("QUANT")
+            or tok in ("QT", "QT.")
+        ):
             idx.setdefault("qtd", i)
-        if any(k in c for k in ["UND", "UNID", "UNIDADE"]) or c in ("UN.", "UN", "UN°"):
+
+        # Unidade
+        if any(k in tok for k in ("UND", "UNID", "UNIDADE")) or tok in ("UN", "UN."):
             idx.setdefault("und", i)
-        if any(k in c for k in ["DESCRI", "ESPECIF", "OBJETO", "SERVIÇO", "MATERIAL", "PRODUTO"]):
+
+        # Descrição / Objeto
+        if any(k in raw for k in ("DESCRI", "ESPECIF", "OBJETO", "SERVIÇO", "SERVICO", "MATERIAL", "PRODUTO")):
             idx.setdefault("obj", i)
+
     return idx
 
 
@@ -267,22 +302,54 @@ def _extract_unit_with_header(row: list[str], und_idx: int) -> str:
     """Extract the unit-of-supply text from a data row.
 
     First tries the mapped ``und`` column; falls back to the nearest cell
-    within ±3 columns that:
-      - is non-empty
-      - contains no "R$" (not a price)
-      - contains no digits (not a number)
-      - is at most 20 characters long (not a description)
+    within ±3 columns that looks like a unit-of-supply.
 
-    Returns an uppercased string, or "" if nothing suitable is found.
+    Important nuance for licitação PDFs:
+    units are often written with package qualifiers that include digits,
+    e.g. "CX. C/\n50" ("caixa com 50"). Those must be accepted; otherwise the
+    unit becomes empty and the item may be dropped by sanitisation.
+
+    Normalises common PDF quirks like split dots: "SERV\n." -> "SERV".
     """
+
+    def _clean_unit(x: str) -> str:
+        x = _norm(x)
+        # Common in pdfplumber: "SERV\n." becomes "SERV ." after normalisation.
+        x = x.replace(" .", ".")
+        x = x.upper().strip()
+        # Remove dots after abbreviations ("UN." -> "UN", "CX." -> "CX").
+        x = re.sub(r"\b([A-Z]{1,4})\.", r"\1", x)
+        # Normalise "C/ 50" -> "C/50".
+        x = re.sub(r"\s*/\s*", "/", x)
+        x = re.sub(r"\s+", " ", x).strip()
+        return x
+
+    def _looks_like_unit(cand: str) -> bool:
+        if not cand:
+            return False
+        if "R$" in cand:
+            return False
+        if len(cand) > 30:
+            return False
+        if not re.search(r"[A-Z]", cand):
+            return False
+        if re.fullmatch(r"\d+(?:[\.,]\d+)?", cand):
+            return False
+        # If there are digits, only allow them in a package qualifier like "C/50".
+        if re.search(r"\d", cand) and not re.search(r"\bC/\d+\b", cand):
+            return False
+        return True
+
     if 0 <= und_idx < len(row):
-        cand = _norm(row[und_idx])
-        if cand and "R$" not in cand and not re.search(r"\d", cand):
-            return cand.upper()
+        cand = _clean_unit(row[und_idx])
+        if _looks_like_unit(cand):
+            return cand
+
     for j in range(max(0, und_idx - 3), min(len(row), und_idx + 4)):
-        cand = _norm(row[j])
-        if cand and "R$" not in cand and not re.search(r"\d", cand) and len(cand) <= 20:
-            return cand.upper()
+        cand = _clean_unit(row[j])
+        if _looks_like_unit(cand):
+            return cand
+
     return ""
 
 
@@ -683,19 +750,48 @@ def _extract_items_from_relacaoitens_text(
 def _table_looks_like_continuation(rows: list[list[str]]) -> bool:
     """Return True if the table appears to continue items from a previous table.
 
+    IMPORTANT: some continuation pages start with one or more rows that *don't*
+    contain an item number (e.g. a wrapped description line like
+    "FORNECIMENTO DE MATERIAL."). For that reason we must scan a small window
+    of rows, not just the first non-empty row.
+
     Heuristic: if the first non-empty row's first 8 cells contain at least one
     parseable item identifier, the table is likely a continuation page.
     This allows the parser to reuse the header map from the previous table
     rather than requiring every page to repeat the column headers.
     """
+
     for row in rows[:5]:
-        if any(row):
-            for c in row[:8]:
-                if _parse_item_id(c) is not None:
-                    return True
-            return False
+        if not any(row):
+            continue
+        for c in row[:8]:
+            if _parse_item_id(c) is not None:
+                return True
     return False
 
+def _merge_header_rows(header_rows: list[list[str]]) -> list[str]:
+    """Merge multi-line header blocks into a single synthetic header row.
+
+    Some PDFs draw the table header across several stacked rows (e.g. the word
+    'ITEM' split as 'ITE' + 'M', and 'DESCRIÇÃO' placed on a different header row).
+    pdfplumber then yields several rows with many empty/None cells.
+
+    This helper concatenates non-empty cells column-wise to produce one row that
+    `_detect_header_indices` can understand.
+    """
+    if not header_rows:
+        return []
+    ncols = max(len(r) for r in header_rows)
+    merged: list[str] = []
+    for j in range(ncols):
+        parts: list[str] = []
+        for r in header_rows:
+            if j < len(r):
+                v = _norm(r[j])
+                if v:
+                    parts.append(v)
+        merged.append(" ".join(parts))
+    return merged
 
 def _extract_items_from_tables(
     tables_json: list[dict[str, Any]],
@@ -752,16 +848,36 @@ def _extract_items_from_tables(
             val = m_lote.group(1)
             current_lote = "LOTE " + ("ÚNICO" if val in ("ÚNICO", "UNICO") else val.zfill(2))
 
+
         # Locate the header row — must have both "item" and "obj" columns to qualify.
         header_idx: Optional[int] = None
         header_map: Optional[dict[str, int]] = None
-        for ri, row in enumerate(rows[:40]):
-            hm = _detect_header_indices(row)
+
+        # (1) Multi-row header (very common in Brazilian licitação PDFs): merge the
+        # header block above the first data row and detect columns from it.
+        first_data_idx: Optional[int] = None
+        for ri, row in enumerate(rows[:80]):
+            if any(_parse_item_id(c) is not None for c in row[:8]):
+                first_data_idx = ri
+                break
+
+        if first_data_idx is not None and first_data_idx > 0:
+            merged_header = _merge_header_rows(rows[max(0, first_data_idx - 10): first_data_idx])
+            hm = _detect_header_indices(merged_header)
             if "item" in hm and "obj" in hm:
-                header_idx = ri
+                header_idx = first_data_idx - 1
                 header_map = hm
                 last_header_map = hm
-                break
+
+        # (2) Fallback: single-row header detection (older PDFs often have this).
+        if header_idx is None:
+            for ri, row in enumerate(rows[:40]):
+                hm = _detect_header_indices(row)
+                if "item" in hm and "obj" in hm:
+                    header_idx = ri
+                    header_map = hm
+                    last_header_map = hm
+                    break
 
         # If no header found, check if the table is a continuation of the previous one.
         if header_idx is None and last_header_map is not None:
