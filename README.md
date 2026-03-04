@@ -192,6 +192,7 @@ outputs/
 
 - PDFs **escaneados** (imagem) não são processados por OCR nesta versão.
 - Anexos do tipo **XLS/XLSX** não são processados.
+- Bugs e falhas de parsing (ex: arquivo 389539bc919572ba8fac88a625970cb7).
 
 ---
 
