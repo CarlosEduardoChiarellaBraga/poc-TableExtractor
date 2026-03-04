@@ -147,12 +147,6 @@ O pipeline roda em duas fases automaticamente:
 1. Extração e parsing → `outputs/pre_resultado_final.json`
 2. Sanitização → `outputs/resultado.json`
 
-Não é necessário rodar o `sanitize.py` manualmente. Ele ainda pode ser executado de forma standalone se necessário:
-
-```bash
-python sanitize.py --input outputs/pre_resultado_final.json --output outputs/resultado.json
-```
-
 ---
 
 ## Saídas geradas
