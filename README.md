@@ -135,23 +135,17 @@ pip install pdfplumber python-docx
 Execute na raiz do projeto (onde existe `downloads/`):
 
 ```bash
-python main.py downloads outputs
+python src/main.py downloads outputs
 ```
 
 Modo debug (inclui `"fonte"` em cada item):
 ```bash
-python main.py downloads outputs --debug
+python src/main.py downloads outputs --debug
 ```
 
 O pipeline roda em duas fases automaticamente:
 1. Extração e parsing → `outputs/pre_resultado_final.json`
 2. Sanitização → `outputs/resultado.json`
-
-Não é necessário rodar o `sanitize.py` manualmente. Ele ainda pode ser executado de forma standalone se necessário:
-
-```bash
-python sanitize.py --input outputs/pre_resultado_final.json --output outputs/resultado.json
-```
 
 ---
 
@@ -192,7 +186,27 @@ outputs/
 
 - PDFs **escaneados** (imagem) não são processados por OCR nesta versão.
 - Anexos do tipo **XLS/XLSX** não são processados.
-- Bugs e falhas de parsing (ex: arquivo 389539bc919572ba8fac88a625970cb7).
+- Bugs e falhas de parsing. Ex:
+```json
+      {
+        "lote": null,
+        "item": "1.95",
+        "objeto": "TOTAIS:",
+        "quantidade": 1095,
+        "unidade_fornecimento": "TOTAIS:"
+      }
+```
+```json
+
+      {
+        "lote": null,
+        "item": "3",
+        "objeto": "OUTSOURCING DE IMPRESSAO - PAGINAS A4 - MONOCROMATICO - DENTRO DA FRANQUIA SEM PAPEL",
+        "quantidade": 26573,
+        "unidade_fornecimento": "PREGÃO"
+      },
+
+```
 
 ---
 
