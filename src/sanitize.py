@@ -5,10 +5,15 @@ sanitize.py
 Filters items inside the result JSON on a per-item basis.
 
 Rule — an item is removed if ANY of these conditions holds:
-  - ``item``                is "" or "0"
-  - ``objeto``              is ""
+  - ``item``                 is "" or "0"
+  - ``objeto``               is ""
   - ``unidade_fornecimento`` is ""
-  - ``quantidade``          is 0 (or non-numeric / None)
+  - ``quantidade``           is 0 (or non-numeric / None)
+
+Additional rule — de-duplication within the same edital (document):
+  - do NOT keep an item if another item in the same document has the same:
+      ("unidade_fornecimento", "objeto", "quantidade", "lote")
+    where lote can be null or non-null.
 
 Output:
   - prints ``itens_before`` and ``itens_after`` counts (global across all docs)
@@ -27,6 +32,17 @@ from typing import Any, Dict, List, Tuple
 def norm(s: Any) -> str:
     """Coerce any value to a stripped string, treating None as empty string."""
     return ("" if s is None else str(s)).strip()
+
+
+def norm_lote(x: Any) -> Any:
+    """Normalize lote for dedup keys.
+
+    Treats None and empty/whitespace as None; otherwise returns stripped string.
+    """
+    if x is None:
+        return None
+    s = norm(x)
+    return None if s == "" else s
 
 
 def to_int(x: Any) -> int:
@@ -67,12 +83,6 @@ def is_invalid_item(it: Dict[str, Any]) -> bool:
       - ``objeto`` is empty
       - ``unidade_fornecimento`` is empty
       - ``quantidade`` resolves to 0
-
-    Args:
-        it: A single item dict as found in ``itens_extraidos``.
-
-    Returns:
-        True if the item should be dropped, False if it should be kept.
     """
     item = norm(it.get("item", ""))
     objeto = norm(it.get("objeto", ""))
@@ -90,30 +100,34 @@ def is_invalid_item(it: Dict[str, Any]) -> bool:
     return False
 
 
+def dedup_key(it: Dict[str, Any]) -> Tuple[Any, str, str, int]:
+    """Key used to detect duplicates within the same edital/document.
+
+    Uses normalized/trimmed strings and integer quantidade.
+    lote is normalized to None when missing/empty.
+    """
+    lote = norm_lote(it.get("lote"))
+    und = norm(it.get("unidade_fornecimento", ""))
+    obj = norm(it.get("objeto", ""))
+    qtd = to_int(it.get("quantidade", 0))
+    return (lote, und, obj, qtd)
+
+
 def filter_payload(payload: Any) -> Tuple[Any, int, int]:
-    """Remove invalid items from every licitação document in the payload.
+    """Remove invalid and duplicate items from every licitação document in the payload.
 
     Supports two payload shapes:
-      - A plain list of document dicts (the normal ``pre_resultado_final.json``
-        format produced by ``main.py``).
+      - A plain list of document dicts (the normal ``pre_resultado_final.json`` format).
       - A dict with a ``"results"`` key containing such a list (legacy wrapper).
 
-    Items that fail ``is_invalid_item`` are silently dropped. Documents that
-    have no ``itens_extraidos`` list (or whose list is empty) are kept
-    unchanged; only individual invalid items are removed.
+    Items that fail ``is_invalid_item`` are dropped.
+    Items that repeat the same ("unidade_fornecimento","objeto","quantidade","lote")
+    within the same document are also dropped (keeps the first occurrence).
 
-    Non-dict items inside ``itens_extraidos`` are also dropped because they
-    cannot be validated against the required fields.
-
-    Args:
-        payload: Deserialised JSON — either a list of docs or a ``{"results": [...]}`` dict.
+    Non-dict items inside ``itens_extraidos`` are dropped.
 
     Returns:
-        A tuple of (filtered_payload, itens_before, itens_after) where
-        ``itens_before`` and ``itens_after`` are global counts across all docs.
-
-    Raises:
-        SystemExit: When the payload shape is not recognised.
+        (filtered_payload, itens_before, itens_after) where counts are global across all docs.
     """
     wrapper = None
     wrapper_key = None
@@ -148,13 +162,20 @@ def filter_payload(payload: Any) -> Tuple[Any, int, int]:
 
         itens_before += len(items)
 
+        seen: set[Tuple[Any, str, str, int]] = set()
         kept_items: List[Any] = []
+
         for it in items:
             if not isinstance(it, dict):
-                # Non-dict item entries are always dropped — can't validate fields.
                 continue
             if is_invalid_item(it):
                 continue
+
+            k = dedup_key(it)
+            if k in seen:
+                # Duplicate within the same edital/doc: skip
+                continue
+            seen.add(k)
             kept_items.append(it)
 
         itens_after += len(kept_items)
@@ -174,15 +195,7 @@ def filter_payload(payload: Any) -> Tuple[Any, int, int]:
 
 
 def main() -> None:
-    """CLI entry point for standalone sanitization of a result JSON file.
-
-    Reads ``pre_resultado_final.json`` (or a custom ``--input`` path), applies
-    ``filter_payload``, and writes the cleaned result to ``resultado.json``
-    (or a custom ``--output`` path).
-
-    With ``--inplace``, the input file is overwritten and a ``.bak`` backup is
-    created automatically before writing.
-    """
+    """CLI entry point for standalone sanitization of a result JSON file."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", type=Path, default=Path("pre_resultado_final.json"))
     ap.add_argument("--output", type=Path, default=Path("resultado.json"))
