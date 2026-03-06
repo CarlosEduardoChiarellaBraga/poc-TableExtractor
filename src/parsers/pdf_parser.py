@@ -101,32 +101,128 @@ def _parse_int_ptbr(s: str) -> Optional[int]:
     return None
 
 
+
+# ── Lote parsing ──────────────────────────────────────────────────────────────
+
+# Generic "LOTE" matcher used in both table and text-block parsers.
+# We keep it permissive for the token, and format/normalise downstream.
+_RE_LOTE_GENERIC = re.compile(r"\bLOTE\s*(?:N[º°]\s*)?([A-Z]?\d{1,3}|ÚNICO|UNICO)\b", re.I)
+
+
+def _format_lote(token: str, suffix: str = "") -> str:
+    """Normalise a lote token to a stable label.
+
+    Examples:
+      - "1"      -> "LOTE 01"
+      - "01"     -> "LOTE 01"
+      - "ÚNICO"  -> "LOTE ÚNICO"
+      - "UNICO"  -> "LOTE ÚNICO"
+      - "A1"     -> "LOTE A01"
+
+    If ``suffix`` is provided (e.g. "PRINCIPAL", "RESERVADO ME/EPP"), it is
+    appended in uppercase.
+    """
+    tok = _norm(token).upper()
+    if tok in ("ÚNICO", "UNICO"):
+        core = "ÚNICO"
+    else:
+        # Optional letter prefix (rare, but some editais use "A1", "B2"...)
+        m = re.fullmatch(r"([A-Z])(\d{1,3})", tok)
+        if m:
+            core = m.group(1) + m.group(2).zfill(2)
+        else:
+            # Digits only
+            core = re.sub(r"\D", "", tok)
+            core = core.zfill(2) if core else tok
+
+    suf = _norm(suffix)
+    if suf:
+        suf = re.sub(r"^[\-–:]+", "", suf).strip()
+    if suf:
+        return f"LOTE {core} {suf.upper()}"
+    return f"LOTE {core}"
+
+
+def _extract_lote_from_row(row: list[str]) -> Optional[str]:
+    """Extract a lote label from a *single* table row, if present.
+
+    Important: lote headers sometimes appear *mid-table* (e.g. a table contains
+    the tail of a previous lot, then a "LOTE 09 ..." row, then the header for
+    the next lot). Therefore, lote detection must be row-based and sequential.
+
+    Returns:
+        Normalised lote label (e.g. "LOTE 09 PRINCIPAL") or None.
+    """
+    if not row or not any(row):
+        return None
+    txt = _norm(" ".join([c for c in row if c]))
+    if not txt:
+        return None
+
+    # Fast check
+    if "LOTE" not in txt.upper():
+        return None
+
+    # Prefer matches that start at the beginning of the row (common for lote titles).
+    m = re.search(r"^\s*LOTE\s*(?:N[º°]\s*)?([A-Z]?\d{1,3}|ÚNICO|UNICO)\b(.*)$", txt, re.I)
+    if m:
+        return _format_lote(m.group(1), m.group(2))
+
+    # Fallback: allow lote mention later in the row only if it's very near the start.
+    m2 = _RE_LOTE_GENERIC.search(txt)
+    if m2 and m2.start() <= 3:
+        return _format_lote(m2.group(1), txt[m2.end():])
+
+    return None
+
+
+def _row_is_header(row: list[str]) -> Optional[dict[str, int]]:
+    """Return a header_map if the row looks like a table header, else None."""
+    hm = _detect_header_indices(row)
+    if "item" in hm and "obj" in hm:
+        return hm
+    return None
+
 # ── Item number parsing ────────────────────────────────────────────────────────
 
-# Matches hierarchical item numbers like "1.2", "10.05" (major up to 4 digits,
-# minor up to 4 digits). NOTE: intentionally does NOT match "280.000" because
-# that would be misidentified as item 280 sub-item 0.
-_RE_HIER_ITEM = re.compile(r"^(\d{1,4})\.(\d{1,4})$")
+# Matches hierarchical item numbers with 2–4 levels, e.g. "1.2", "13.2.1", "5.1.1.1".
+# Major part: up to 4 digits; each subsequent segment: 1–2 digits.
+# This is intentionally strict to avoid misclassifying quantities like "1.178.040" as item IDs.
+_RE_HIER_ITEM = re.compile(r"^(\d{1,4})(\.\d{1,2}){1,3}$")
 
 # Matches flat item numbers like "1", "007", "12345".
 _RE_FLAT_ITEM = re.compile(r"^\d{1,5}$")
 
 
-def _parse_item_id(s: str) -> Optional[tuple[int, Optional[int]]]:
+def _parse_item_id(s: str) -> Optional[tuple[int, Optional[str]]]:
     """Parse a cell value as an item identifier.
 
     Returns:
-        ``(major, minor)`` for hierarchical items ("1.2" → (1, 2)).
-        ``(n, None)``      for flat items ("7" → (7, None)).
-        ``None``           if the string is not a recognisable item number.
+        ``(major, sub)`` for hierarchical items:
+            "1.2"     → (1, "2")
+            "13.2.1"  → (13, "2.1")
+            "5.1.1.1" → (5, "1.1.1")
+        ``(n, None)``  for flat items ("7" → (7, None)).
+        ``None``       if the string is not a recognisable item number.
+
+    Also handles PDF line-split artefacts like "5.1.1. 1" (space/newline before
+    the last digit after a dot), which are normalised to "5.1.1.1" before matching.
     """
     s = _norm(s)
+    # Some PDFs render item numbers with leading/trailing punctuation, e.g. ".4", "4.", "• 12".
+    s = re.sub(r"^[\s\.\-–•]+", "", s)
+    s = re.sub(r"[\.\-–]+$", "", s)
+    # Fix PDF line-break artefact: "5.1.1. 1" → "5.1.1.1"
+    s = re.sub(r"\.\s+(\d)", r".\1", s)
+
     m = _RE_HIER_ITEM.match(s)
     if m:
-        return int(m.group(1)), int(m.group(2))
+        parts = s.split(".")
+        return int(parts[0]), ".".join(parts[1:])
     if _RE_FLAT_ITEM.match(s):
         return int(s), None
     return None
+
 
 
 def _is_item_number(s: str) -> bool:
@@ -154,7 +250,7 @@ def _is_section_title(text: str) -> bool:
         return False
 
     # Only treat as a "section" if it contains a typical section keyword.
-    if not re.search(r"(GRUPO|SUBGRUPO|SEÇÃO|SECAO|CATEGORIA|LOTE|ANEXO|TOTAL)", t.upper()):
+    if not re.search(r"\b(GRUPO|SUBGRUPO|SEÇÃO|SECAO|CATEGORIA|LOTE|ANEXO|TOTAL)\b", t.upper()):
         return False
 
     alpha = [c for c in t if c.isalpha()]
@@ -257,6 +353,17 @@ def _pick_obj(row: list[str], preferred_idx: int) -> str:
                 score += 20
             if _looks_like_code(c):
                 score -= 10
+            # Avoid choosing the unit-of-supply cell as the object when the
+            # header map is off by one (common on continuation pages).
+            # Examples seen in PDFs: objeto="unid" / objeto="und".
+            tok2 = _compact_header_token(c)
+            if tok2 in {
+                "UN", "UNID", "UND", "UNIDADE", "UNIDADES",
+                "CX", "CAIXA", "PCT", "PACOTE", "KIT",
+                "SERV", "SERVICO", "SERVIÇO",
+                "M", "M2", "M3", "L", "KG",
+            }:
+                score -= 50
             candidates.append((score, c))
     if candidates:
         return max(candidates, key=lambda x: x[0])[1]
@@ -282,14 +389,21 @@ def _extract_qty_with_header(row: list[str], qtd_idx: int, item_num: int) -> int
         Extracted quantity as a positive int, or 0 if none found.
     """
     if 0 <= qtd_idx < len(row):
-        q = _parse_int_ptbr(row[qtd_idx])
-        if q is not None and q > 0:
-            return q
+        cell = row[qtd_idx]
+        # Guard: when the header map is wrong, the quantity window may hit the
+        # item-id cell (e.g. "5.1.1. 1"), which would parse as 5111.
+        if not ("." in _norm(cell) and _is_item_number(cell)):
+            q = _parse_int_ptbr(cell)
+            if q is not None and q > 0:
+                return q
     best_q: Optional[int] = None
     for j in range(max(0, qtd_idx - 4), min(len(row), qtd_idx + 5)):
         if j == qtd_idx:
             continue
-        q = _parse_int_ptbr(row[j])
+        cell = row[j]
+        if "." in _norm(cell) and _is_item_number(cell):
+            continue
+        q = _parse_int_ptbr(cell)
         if q is not None and q > 0:
             if q != item_num:
                 return q
@@ -298,11 +412,17 @@ def _extract_qty_with_header(row: list[str], qtd_idx: int, item_num: int) -> int
     return best_q if best_q is not None else 0
 
 
-def _extract_unit_with_header(row: list[str], und_idx: int) -> str:
+def _extract_unit_with_header(row: list[str], und_idx: int, obj_text: str = "") -> str:
     """Extract the unit-of-supply text from a data row.
 
-    First tries the mapped ``und`` column; falls back to the nearest cell
-    within ±3 columns that looks like a unit-of-supply.
+    Strategy:
+      1) Try the mapped ``und`` column (when available).
+      2) Otherwise, scan a small window around ``und_idx``.
+      3) If ``und_idx`` is unknown (-1) or no good candidate is found, scan the whole row.
+
+    Unlike the older "first match wins" fallback, we score candidates and pick the
+    best one. This avoids classic failures where the *object* value (e.g. "Container")
+    is mistakenly returned as the unit when the header map is missing/shifted.
 
     Important nuance for licitação PDFs:
     units are often written with package qualifiers that include digits,
@@ -311,6 +431,21 @@ def _extract_unit_with_header(row: list[str], und_idx: int) -> str:
 
     Normalises common PDF quirks like split dots: "SERV\n." -> "SERV".
     """
+
+    # Common unit tokens seen in licitação/engenharia BOQs.
+    STRONG_UNIT_TOKENS = {
+        "UN", "UNID", "UND", "UNIDADE", "UNIDADES",
+        "M", "M2", "M²", "M3", "M³", "CM", "MM", "KM",
+        "L", "LT", "LITRO", "LITROS", "ML",
+        "KG", "G", "TON", "T",
+        "PAR", "PÇ", "PCA", "PECA", "PEÇA", "PEÇAS",
+        "H", "HR", "HORA", "HORAS", "DIA", "DIAS", "MÊS", "MES",
+        "SERV", "SERVICO", "SERVIÇO", "SERVIÇOS",
+        "JOGO", "CONJUNTO", "KIT",
+        "CX", "CAIXA", "PCT", "PACOTE", "FARDO", "ROLO", "EMB", "EMBALAGEM",
+        "FRASCO", "GALAO", "GALÃO", "SACO", "BARRA",
+    }
+    QUALIFIER_WORDS = {"CX", "CAIXA", "PCT", "PACOTE", "KIT", "EMB", "EMBALAGEM", "FARDO", "ROLO", "JOGO", "CONJUNTO"}
 
     def _clean_unit(x: str) -> str:
         x = _norm(x)
@@ -329,28 +464,95 @@ def _extract_unit_with_header(row: list[str], und_idx: int) -> str:
             return False
         if "R$" in cand:
             return False
-        if len(cand) > 30:
+        if len(cand) > 40:
             return False
-        if not re.search(r"[A-Z]", cand):
+        if not re.search(r"[A-ZÀ-Ú]", cand):
             return False
+        # Pure number (or decimal) isn't a unit.
         if re.fullmatch(r"\d+(?:[\.,]\d+)?", cand):
             return False
-        # If there are digits, only allow them in a package qualifier like "C/50".
-        if re.search(r"\d", cand) and not re.search(r"\bC/\d+\b", cand):
+        # Reject obvious item-number strings.
+        if _parse_item_id(cand) is not None:
             return False
+
+        # If there are digits, accept common package qualifiers (e.g. "C/50",
+        # "CAIXA 50 UNIDADE", "PACOTE 100 FOLHAS").
+        if re.search(r"\d", cand):
+            if re.search(r"\bC/\d+\b", cand):
+                return True
+            if any(w in cand for w in QUALIFIER_WORDS):
+                return True
+            # Some units include dimensions like "40 X 40 X 60 CM" (not a unit).
+            return False
+
         return True
 
+    obj_u = _clean_unit(obj_text) if obj_text else ""
+
+    def _score_unit(cand: str, j: int) -> int:
+        # Higher is better.
+        score = 0
+
+        # Strong signal: exact match to known unit tokens.
+        if cand in STRONG_UNIT_TOKENS:
+            score += 200
+
+        # Short abbreviations are more likely units than long nouns.
+        if re.fullmatch(r"[A-ZÀ-Ú]{1,4}[0-9]{0,2}", cand):
+            score += 80
+
+        # Package qualifiers ("CAIXA 50 UNIDADE", "C/50", etc).
+        if re.search(r"\bC/\d+\b", cand):
+            score += 70
+        if any(w in cand for w in QUALIFIER_WORDS):
+            score += 40
+
+        # Prefer candidates near the expected unit column when we have one.
+        if und_idx >= 0:
+            score += max(0, 20 - abs(j - und_idx) * 5)
+
+        # Avoid returning the object cell as unit when header mapping is missing.
+        if obj_u and cand == obj_u and cand not in STRONG_UNIT_TOKENS:
+            score -= 250
+
+        # Long single-word nouns (e.g. "CONTAINER") are usually object names, not units.
+        if " " not in cand and len(cand) >= 9 and cand not in STRONG_UNIT_TOKENS:
+            score -= 60
+
+        # Mild preference for shorter units.
+        score -= min(len(cand), 30)
+
+        return score
+
+    def _best_from_indices(indices: list[int]) -> str:
+        best: tuple[int, str] | None = None
+        for j in indices:
+            if 0 <= j < len(row):
+                cand = _clean_unit(row[j])
+                if not _looks_like_unit(cand):
+                    continue
+                sc = _score_unit(cand, j)
+                if best is None or sc > best[0]:
+                    best = (sc, cand)
+        return best[1] if best is not None else ""
+
+    # 1) Try mapped column directly.
     if 0 <= und_idx < len(row):
         cand = _clean_unit(row[und_idx])
         if _looks_like_unit(cand):
             return cand
 
-    for j in range(max(0, und_idx - 3), min(len(row), und_idx + 4)):
-        cand = _clean_unit(row[j])
-        if _looks_like_unit(cand):
-            return cand
+    # 2) Window around expected column (or around start if und_idx=-1).
+    if und_idx >= 0:
+        window = list(range(max(0, und_idx - 3), min(len(row), und_idx + 4)))
+    else:
+        window = list(range(0, min(len(row), 6)))
+    best = _best_from_indices(window)
+    if best:
+        return best
 
-    return ""
+    # 3) Whole-row fallback (for tables without explicit headers).
+    return _best_from_indices(list(range(len(row)))) or ""
 
 
 def _estimate_confidence(item: ItemExtraido, doc_type: str) -> float:
@@ -654,7 +856,7 @@ def _extract_items_from_relacaoitens_text(
     m_lote = _RE_RI_LOTE.search(text[:500])
     if m_lote:
         val = m_lote.group(1).upper()
-        current_lote = "LOTE " + ("ÚNICO" if val in ("ÚNICO", "UNICO") else val.zfill(2))
+        current_lote = _format_lote(val)
 
     lines = text.splitlines()
 
@@ -707,7 +909,7 @@ def _extract_items_from_relacaoitens_text(
         lote = current_lote
         if m_lote2:
             val2 = m_lote2.group(1).upper()
-            lote = "LOTE " + ("ÚNICO" if val2 in ("ÚNICO", "UNICO") else val2.zfill(2))
+            lote = _format_lote(val2)
 
         it = ItemExtraido(
             item=str(num),
@@ -793,6 +995,7 @@ def _merge_header_rows(header_rows: list[list[str]]) -> list[str]:
         merged.append(" ".join(parts))
     return merged
 
+
 def _extract_items_from_tables(
     tables_json: list[dict[str, Any]],
     *,
@@ -801,35 +1004,38 @@ def _extract_items_from_tables(
 ) -> tuple[list[ItemExtraido], dict[str, str]]:
     """Extract items from a list of table dicts (PDF or DOCX origin).
 
-    Processing pipeline per table:
-      1. Detect lote from the first 3 rows (header area).
-      2. Find the header row within the first 40 rows using keyword detection.
-         If no header is found but the table looks like a continuation,
-         reuse the last seen header map.
-      3. For each data row after the header:
-         a. Scan the first 8 cells for an item number.
-         b. Skip rows where qty and unit are empty and the text is a section title.
-         c. Rows without an item number are appended to the previous item's
-            objeto (multi-line descriptions split across rows).
+    This version fixes two common lote-related failure modes:
 
-    After all tables are processed:
-      - Deduplicate by (lote, item) key using the same score function.
-      - Drop items with no objeto and no quantity.
-      - Sort by (lote, item_sort_key).
+      1) **Lote headers mid-table**:
+         Some PDFs concatenate multiple lots into a single extracted table, e.g.
+         the table starts with the tail of the previous lot, then a row like
+         "LOTE 09 PRINCIPAL", then a new header + items.
+         Lote detection must therefore be **row-based and sequential**, not
+         a single "first rows" guess for the whole table.
 
-    Args:
-        tables_json: List of table dicts as produced by the extractor.
-        doc_type:    Source document type for confidence weighting.
-        debug:       Controls whether ``fonte`` is populated.
+      2) **Continuation rows before a repeated header**:
+         A table can begin with data rows (continuation) and only later repeat
+         the header row. We initialise `active_header_map` from the best header
+         we can find (merged header block or a later header row) so we can
+         parse those early rows too, while still skipping the header row when
+         we encounter it.
+
+    Processing pipeline per table (sequential scan):
+      - Update `current_lote` whenever a lote-title row is found.
+      - Update `active_header_map` whenever a header row is found.
+      - Parse item rows using `active_header_map`.
+      - Append non-item rows to the previous item's `objeto` when they look
+        like wrapped description lines.
 
     Returns:
         Tuple of (items list, metadata dict).
     """
     itens: list[ItemExtraido] = []
     anexos: set[str] = set()
+
     current_lote: Optional[str] = None
-    last_item: Optional[ItemExtraido] = None        # used for multi-row description appending
-    last_header_map: Optional[dict[str, int]] = None  # reused for continuation tables
+    last_item: Optional[ItemExtraido] = None
+    last_header_map: Optional[dict[str, int]] = None
 
     for t in tables_json:
         fonte_arquivo = _norm(t.get("arquivo", ""))
@@ -840,21 +1046,10 @@ def _extract_items_from_tables(
         if not rows:
             continue
 
-        # Check the first 3 rows for a lote label.
-        joined = " ".join([c for r in rows[:3] for c in r if c])
-        m_lote = re.search(r"\bLOTE\s+([0-9]{1,3}|ÚNICO|UNICO)\b", joined.upper())
-        m_lote = re.search(r"\bLOTE\s+([A-Z]?\d{1,3}|ÚNICO|UNICO)\b",joined.upper())
-        if m_lote:
-            val = m_lote.group(1)
-            current_lote = "LOTE " + ("ÚNICO" if val in ("ÚNICO", "UNICO") else val.zfill(2))
-
-
-        # Locate the header row — must have both "item" and "obj" columns to qualify.
-        header_idx: Optional[int] = None
+        # ── Pick an initial header_map to parse *all* rows in this table ──
         header_map: Optional[dict[str, int]] = None
 
-        # (1) Multi-row header (very common in Brazilian licitação PDFs): merge the
-        # header block above the first data row and detect columns from it.
+        # (1) Multi-row header: detect header block above the first data row.
         first_data_idx: Optional[int] = None
         for ri, row in enumerate(rows[:80]):
             if any(_parse_item_id(c) is not None for c in row[:8]):
@@ -865,35 +1060,50 @@ def _extract_items_from_tables(
             merged_header = _merge_header_rows(rows[max(0, first_data_idx - 10): first_data_idx])
             hm = _detect_header_indices(merged_header)
             if "item" in hm and "obj" in hm:
-                header_idx = first_data_idx - 1
                 header_map = hm
                 last_header_map = hm
 
-        # (2) Fallback: single-row header detection (older PDFs often have this).
-        if header_idx is None:
-            for ri, row in enumerate(rows[:40]):
-                hm = _detect_header_indices(row)
-                if "item" in hm and "obj" in hm:
-                    header_idx = ri
+        # (2) Fallback: find any header row within the first 60 rows.
+        if header_map is None:
+            for row in rows[:60]:
+                hm = _row_is_header(row)
+                if hm:
                     header_map = hm
                     last_header_map = hm
                     break
 
-        # If no header found, check if the table is a continuation of the previous one.
-        if header_idx is None and last_header_map is not None:
+        # (3) Continuation: if still none, reuse previous header_map if table starts with items.
+        if header_map is None and last_header_map is not None:
             if _table_looks_like_continuation(rows):
-                header_idx = -1          # sentinel: start from row 0
                 header_map = last_header_map
 
-        if header_idx is None or header_map is None:
-            continue  # table has no recognisable structure — skip
+        if header_map is None:
+            continue  # no structure we can parse
 
-        # -1 means the table starts at row 0 (continuation); otherwise skip the header row.
-        start_row = 0 if header_idx == -1 else header_idx + 1
+        active_header_map = header_map
 
-        for row in rows[start_row:]:
-            # Scan the first 8 cells for an item identifier.
-            item_id: Optional[tuple[int, Optional[int]]] = None
+        # ── Sequential scan: update lote/header mid-table and parse rows ──
+        for row in rows:
+            if not any(row):
+                continue
+
+            # (A) Lote-title row (can appear at the top OR mid-table).
+            lote_label = _extract_lote_from_row(row)
+            if lote_label:
+                current_lote = lote_label
+                last_item = None
+                continue
+
+            # (B) Header row (can also appear mid-table).
+            hm = _row_is_header(row)
+            if hm:
+                active_header_map = hm
+                last_header_map = hm
+                last_item = None
+                continue
+
+            # (C) Parse data row.
+            item_id: Optional[tuple[int, Optional[str]]] = None
             for c in row[:8]:
                 parsed = _parse_item_id(c)
                 if parsed is not None:
@@ -901,28 +1111,25 @@ def _extract_items_from_tables(
                     break
 
             if item_id is not None:
-                major, minor = item_id
-                if minor is not None:
-                    # Hierarchical item (e.g. "1.2") — store as-is for now;
-                    # the merger handles these separately from flat items.
-                    item_str = f"{major}.{minor}"
-                else:
-                    qtd_idx = header_map.get("qtd", -1)
-                    und_idx = header_map.get("und", -1)
-                    obj_idx = header_map.get("obj", 0)
-                    qty_cell = row[qtd_idx] if 0 <= qtd_idx < len(row) else ""
-                    und_cell = row[und_idx] if 0 <= und_idx < len(row) else ""
-                    obj_text = _pick_obj(row, obj_idx)
-                    # Skip rows that look like section dividers (e.g. "GRUPO 1")
-                    # rather than actual items — they have a number but no qty/unit.
-                    if not qty_cell and not und_cell and _is_section_title(obj_text):
-                        last_item = None
-                        continue
-                    item_str = str(major)
+                major, sub = item_id
+                item_str = f"{major}.{sub}" if sub is not None else str(major)
 
-                obj = _pick_obj(row, header_map.get("obj", 0)).strip()
-                qtd = _extract_qty_with_header(row, header_map.get("qtd", -1), major)
-                und = _extract_unit_with_header(row, header_map.get("und", -1)).strip()
+                obj_idx = active_header_map.get("obj", 0)
+                qtd_idx = active_header_map.get("qtd", -1)
+                und_idx = active_header_map.get("und", -1)
+
+                qty_cell = row[qtd_idx] if 0 <= qtd_idx < len(row) else ""
+                und_cell = row[und_idx] if 0 <= und_idx < len(row) else ""
+                obj_text = _pick_obj(row, obj_idx)
+
+                # Skip "section rows" that look like group/lot dividers.
+                if not qty_cell and not und_cell and _is_section_title(obj_text):
+                    last_item = None
+                    continue
+
+                obj = obj_text.strip()
+                qtd = _extract_qty_with_header(row, qtd_idx, major)
+                und = _extract_unit_with_header(row, und_idx, obj).strip()
 
                 it = ItemExtraido(
                     item=item_str,
@@ -936,21 +1143,25 @@ def _extract_items_from_tables(
                 itens.append(it)
                 last_item = it
             else:
-                # Row has no item number — could be a continuation of the previous item's
-                # description or a section title to be ignored.
-                if not any(c for c in row if c):
-                    continue  # empty row — skip
-                if last_item:
-                    txt = _pick_obj(row, header_map.get("obj", 0)).strip()
-                    if txt and len(txt) > 2:
-                        if _is_section_title(txt):
-                            # Section title ends the current item context.
-                            last_item = None
-                        else:
-                            # Append continuation text to the last item's description.
-                            last_item.objeto = (last_item.objeto + " " + txt).strip()
+                # Non-item row: may be a wrapped description line for the previous item.
+                if not last_item:
+                    continue
+                txt = _pick_obj(row, active_header_map.get("obj", 0)).strip()
+                if not txt or len(txt) <= 2:
+                    continue
+                if _is_section_title(txt):
+                    last_item = None
+                    continue
+                # Avoid appending obvious header-ish noise if something slipped through.
+                if _row_is_header(row):
+                    last_item = None
+                    continue
+                if _extract_lote_from_row(row):
+                    last_item = None
+                    continue
+                last_item.objeto = (last_item.objeto + " " + txt).strip()
 
-    # Deduplicate by (lote, item) — same scoring as the relacaoitens parser.
+    # Deduplicate by (lote, item) — keep the highest-scoring version.
     best: dict[tuple, ItemExtraido] = {}
     for it in itens:
         key = (it.lote, it.item)
@@ -963,15 +1174,11 @@ def _extract_items_from_tables(
             if _score(it) > _score(cur):
                 best[key] = it
 
-    # Drop items that have neither an object description nor a quantity —
-    # these are usually artefacts of misidentified section rows.
     final_itens = [v for v in best.values() if v.objeto or v.quantidade]
     final_itens.sort(key=lambda x: (x.lote or "", x.item_sort_key()))
 
-    # Build metadata from the full text of all tables combined.
-    all_text = "\n".join(
-        [_table_text(_flatten_table(t.get("dados", []))) for t in tables_json]
-    )
+    # Metadata from all table text.
+    all_text = "\n".join([_table_text(_flatten_table(t.get("dados", []))) for t in tables_json])
     numero = _extract_numero_pregao(all_text)
     orgao, cidade, estado = _extract_orgao_cidade_estado(all_text)
     meta = {"numero_pregao": numero, "orgao": orgao, "cidade": cidade, "estado": estado}
