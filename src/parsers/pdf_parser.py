@@ -565,7 +565,7 @@ def _estimate_confidence(item: ItemExtraido, doc_type: str) -> float:
       +0.05 if objeto is at least 20 characters
 
     The total is then multiplied by a doc_type weight:
-      relacaoitens=1.0, edital=0.9, termo_referencia=0.8, others=0.85
+      edital=1.0, termo_referencia=0.9, relacaoitens=0.8, others=0.85
 
     Args:
         item:     The partially constructed ItemExtraido.
@@ -581,7 +581,7 @@ def _estimate_confidence(item: ItemExtraido, doc_type: str) -> float:
         base += 0.15
     if len(item.objeto) >= 20:
         base += 0.05
-    w = {"relacaoitens": 1.0, "edital": 0.9, "termo_referencia": 0.8}.get(doc_type, 0.85)
+    w = {"edital": 1.0, "termo_referencia": 0.9, "relacaoitens": 0.8}.get(doc_type, 0.85)
     return round(min(1.0, base * w), 2)
 
 
