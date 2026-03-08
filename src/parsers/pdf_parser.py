@@ -299,9 +299,7 @@ def _detect_header_indices(header_row: list[str]) -> dict[str, int]:
         tok = _compact_header_token(cell)
 
         # ITEM / Nº ITEM variants (tok catches "ITE M" -> "ITEM")
-        if tok in ("ITEM", "ITEM.", "NITEM", "NOITEM", "NºITEM", "N°ITEM", "N°", "Nº") or raw.startswith("ITEM"):
-            idx.setdefault("item", i)
-
+        if (tok in ("ITEM", "ITEM.", "NITEM", "NOITEM", "NºITEM", "N°ITEM", "N°", "Nº", "ORDEM") or raw.startswith("ITEM")or raw.startswith("ORDEM")): idx.setdefault("item", i)
         # Quantidade
         # Quantidade ("QTD", "QUANT.", "QUANTIDADE")
         if (
