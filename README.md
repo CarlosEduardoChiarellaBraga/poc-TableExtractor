@@ -186,27 +186,18 @@ outputs/
 
 - PDFs **escaneados** (imagem) não são processados por OCR nesta versão.
 - Anexos do tipo **XLS/XLSX** não são processados.
-- Bugs e falhas de parsing. Ex:
+- Bugs e falhas de parsing. No exemplo abaixo, um código é parseado para o item "quantidade":
 ```json
       {
         "lote": null,
-        "item": "1.95",
-        "objeto": "TOTAIS:",
-        "quantidade": 1095,
-        "unidade_fornecimento": "TOTAIS:"
-      }
-```
-```json
-
-      {
-        "lote": null,
-        "item": "3",
-        "objeto": "OUTSOURCING DE IMPRESSAO - PAGINAS A4 - MONOCROMATICO - DENTRO DA FRANQUIA SEM PAPEL",
-        "quantidade": 26573,
-        "unidade_fornecimento": "PREGÃO"
+        "item": "3.2.12",
+        "objeto": "ELETRODUTO FLEXÍVEL CORRUGADO, PVC, DN 20 MM (1/2\"), PARA CIRCUITOS TERMINAIS, INSTALADO EM LAJE - FORNECIMENTO E INSTALAÇÃO. AF_03/2023",
+        "quantidade": 91842,
+        "unidade_fornecimento": "M",
+        "fonte": "downloads/2024-08-15-09-33-44-conlicitacao-7c520e397456af2bfec4e27fc2222eae/2024-08-15-conlicitacao-eed34cec10cb326f478880254bf9288a-67-2024_-_edital_-_portas_de_segurana_jk-476452.docx"
       },
-
 ```
+- Deduplicador acaba removendo itens que realmente deveriam se repetir para evitar alguns bugs.
 
 ---
 
