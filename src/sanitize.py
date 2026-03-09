@@ -5,15 +5,18 @@ sanitize.py
 Filters items inside the result JSON on a per-item basis.
 
 Rule — an item is removed if ANY of these conditions holds:
-  - ``item``                 is "" or "0"
+  - ``item``                 equals "0" (known extraction garbage)
   - ``objeto``               is ""
   - ``unidade_fornecimento`` is ""
   - ``quantidade``           is 0 (or non-numeric / None)
 
 Additional rule — de-duplication within the same edital (document):
-  - do NOT keep an item if another item in the same document has the same:
-      ("unidade_fornecimento", "objeto", "quantidade", "lote")
-    where lote can be null or non-null.
+  - Items are grouped by ("unidade_fornecimento", "objeto", "quantidade", "lote")
+    (lote can be null or non-null).
+  - If a group contains at least one record with a non-empty ``item``, all records
+    with empty/None ``item`` are dropped.
+  - If multiple records have non-empty ``item``, they are kept when their ``item``
+    values differ (exact duplicates keep only the first).
 
 Output:
   - prints ``itens_before`` and ``itens_after`` counts (global across all docs)
@@ -79,7 +82,7 @@ def is_invalid_item(it: Dict[str, Any]) -> bool:
 
     An item is considered invalid — and should be removed — when any of the
     following is true:
-      - ``item`` is empty or equals "0"
+      - ``item`` equals "0" (known extraction garbage)
       - ``objeto`` is empty
       - ``unidade_fornecimento`` is empty
       - ``quantidade`` resolves to 0
@@ -89,13 +92,15 @@ def is_invalid_item(it: Dict[str, Any]) -> bool:
     und = norm(it.get("unidade_fornecimento", ""))
     qtd = to_int(it.get("quantidade", 0))
 
-    if item == "" or item == "0":
+    # Allow missing/empty item here; it can still be kept if it doesn't collide
+    # with a better (non-empty item) record during de-duplication.
+    if item == "0":
         return True
     if objeto == "":
         return True
     if und == "":
         return True
-    if qtd == 0:
+    if qtd == 0 or qtd >= 10**9:
         return True
     return False
 
@@ -113,6 +118,15 @@ def dedup_key(it: Dict[str, Any]) -> Tuple[Any, str, str, int]:
     return (lote, und, obj, qtd)
 
 
+def norm_item_for_dedup(it: Dict[str, Any]) -> str:
+    """Normalize the 'item' field for tie-breaking during de-duplication.
+
+    Returns a stripped string; treats None as empty. Keeps original punctuation.
+    The caller decides what counts as "present" (non-empty).
+    """
+    return norm(it.get("item", ""))
+
+
 def filter_payload(payload: Any) -> Tuple[Any, int, int]:
     """Remove invalid and duplicate items from every licitação document in the payload.
 
@@ -121,8 +135,10 @@ def filter_payload(payload: Any) -> Tuple[Any, int, int]:
       - A dict with a ``"results"`` key containing such a list (legacy wrapper).
 
     Items that fail ``is_invalid_item`` are dropped.
-    Items that repeat the same ("unidade_fornecimento","objeto","quantidade","lote")
-    within the same document are also dropped (keeps the first occurrence).
+    De-duplication is done within the same document on ("unidade_fornecimento","objeto","quantidade","lote"):
+      - if any record in the duplicate-group has a non-empty ``item``, all records with empty/None ``item`` are dropped
+      - if multiple records have non-empty ``item``, they are kept when their ``item`` values differ
+      - exact duplicates (same base key + same non-empty ``item``) keep only the first occurrence
 
     Non-dict items inside ``itens_extraidos`` are dropped.
 
@@ -162,21 +178,47 @@ def filter_payload(payload: Any) -> Tuple[Any, int, int]:
 
         itens_before += len(items)
 
-        seen: set[Tuple[Any, str, str, int]] = set()
-        kept_items: List[Any] = []
-
-        for it in items:
+        # De-duplication is done in two steps:
+        #   1) group items by the base key (lote, unidade_fornecimento, objeto, quantidade)
+        #   2) within each group:
+        #        - if any record has a non-empty item, drop the empty/None item ones
+        #        - keep distinct non-empty item values (but collapse exact duplicates)
+        #        - if *all* items are empty/None, keep only the first record
+        grouped: dict[Tuple[Any, str, str, int], List[Tuple[int, Dict[str, Any], str]]] = {}
+        for pos, it in enumerate(items):
             if not isinstance(it, dict):
                 continue
             if is_invalid_item(it):
                 continue
-
             k = dedup_key(it)
-            if k in seen:
-                # Duplicate within the same edital/doc: skip
-                continue
-            seen.add(k)
-            kept_items.append(it)
+            item_norm = norm_item_for_dedup(it)
+            grouped.setdefault(k, []).append((pos, it, item_norm))
+
+        keep_pos: set[int] = set()
+
+        for _k, group in grouped.items():
+            # Preserve original order (group is built in scan order)
+            has_present_item = any((itm.strip() != "" and itm.strip() != "0") for (_pos, _it, itm) in group)
+
+            if has_present_item:
+                seen_items: set[str] = set()
+                for pos, _it, itm in group:
+                    itm2 = itm.strip()
+                    if itm2 == "" or itm2 == "0":
+                        continue
+                    # Collapse exact duplicates where item is the same.
+                    if itm2 in seen_items:
+                        continue
+                    seen_items.add(itm2)
+                    keep_pos.add(pos)
+            else:
+                # All items empty/None -> keep the first occurrence only.
+                keep_pos.add(group[0][0])
+
+        kept_items: List[Any] = []
+        for pos in range(len(items)):
+            if pos in keep_pos:
+                kept_items.append(items[pos])
 
         itens_after += len(kept_items)
 
